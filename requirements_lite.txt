@@ -1,0 +1,21 @@
+# requirements_lite.txt
+# 轻量化手语识别项目依赖
+
+# PyTorch - 请单独安装带CUDA的版本
+# pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu121
+
+# 核心依赖
+transformers>=4.30.0
+einops>=0.6.0
+numpy>=1.24.0
+tqdm>=4.65.0
+
+# 视频处理
+opencv-python>=4.8.0
+decord>=0.6.0
+
+# 推理加速 (可选，用于姿态提取)
+# onnxruntime-gpu>=1.15.0
+
+# 工具库
+huggingface_hub>=0.16.0
