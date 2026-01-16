@@ -280,7 +280,7 @@ def create_demo_dataset():
     
     os.makedirs(pose_dir, exist_ok=True)
     
-    # 生成10个演示样本
+    # 生成15个演示样本 (增加样本数)
     demo_texts = [
         "你好",
         "谢谢你",
@@ -291,7 +291,12 @@ def create_demo_dataset():
         "对不起",
         "没关系",
         "早上好",
-        "晚安"
+        "晚安",
+        "吃饭了吗",
+        "我爱你",
+        "辛苦了",
+        "不客气",
+        "欢迎光临"
     ]
     
     demo_data = {}
@@ -312,13 +317,43 @@ def create_demo_dataset():
         num_frames = 60
         num_keypoints = 133
         
-        # 生成随机姿态数据
-        keypoints = np.random.randn(num_frames, 1, num_keypoints, 2) * 0.1 + 0.5
-        scores = np.random.uniform(0.5, 1.0, (num_frames, 1, num_keypoints))
+        # 生成更合理的姿态数据（归一化到0-1范围）
+        # 模拟真实的人体姿态分布
+        base_x = 0.5  # 人体中心x
+        base_y = 0.4  # 人体中心y
+        
+        keypoints = np.zeros((num_frames, 1, num_keypoints, 2), dtype=np.float32)
+        
+        for f in range(num_frames):
+            # 添加一些时序变化模拟动作
+            t = f / num_frames
+            offset = np.sin(t * np.pi * 2) * 0.05
+            
+            # 身体关键点 (0-22): 集中在身体中心
+            keypoints[f, 0, :23, 0] = base_x + np.random.uniform(-0.15, 0.15, 23) + offset
+            keypoints[f, 0, :23, 1] = base_y + np.random.uniform(-0.2, 0.3, 23)
+            
+            # 面部关键点 (23-90): 在头部区域
+            keypoints[f, 0, 23:91, 0] = base_x + np.random.uniform(-0.08, 0.08, 68)
+            keypoints[f, 0, 23:91, 1] = base_y - 0.15 + np.random.uniform(-0.05, 0.05, 68)
+            
+            # 左手关键点 (91-111): 在左侧
+            keypoints[f, 0, 91:112, 0] = base_x - 0.2 + np.random.uniform(-0.05, 0.05, 21) + offset
+            keypoints[f, 0, 91:112, 1] = base_y + 0.1 + np.random.uniform(-0.05, 0.05, 21)
+            
+            # 右手关键点 (112-132): 在右侧
+            keypoints[f, 0, 112:133, 0] = base_x + 0.2 + np.random.uniform(-0.05, 0.05, 21) - offset
+            keypoints[f, 0, 112:133, 1] = base_y + 0.1 + np.random.uniform(-0.05, 0.05, 21)
+        
+        # 确保在0-1范围内
+        keypoints = np.clip(keypoints, 0.0, 1.0)
+        
+        # 置信度分数
+        scores = np.random.uniform(0.7, 1.0, (num_frames, 1, num_keypoints)).astype(np.float32)
         
         pose_data = {
-            'keypoints': keypoints.astype(np.float32),
-            'scores': scores.astype(np.float32),
+            'keypoints': keypoints,
+            'scores': scores,
         }
         
         # 保存姿态文件
@@ -328,9 +363,9 @@ def create_demo_dataset():
     
     # 划分数据集
     keys = list(demo_data.keys())
-    train_keys = keys[:7]
-    dev_keys = keys[7:9]
-    test_keys = keys[9:]
+    train_keys = keys[:10]
+    dev_keys = keys[10:13]
+    test_keys = keys[13:]
     
     # 保存标签文件
     for phase, phase_keys in [('train', train_keys), ('dev', dev_keys), ('test', test_keys)]:

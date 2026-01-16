@@ -17,7 +17,7 @@ from datasets_lite import SignLanguageDataset, SignLanguageDatasetSimple
 
 # 检查 CUDA 可用性
 if torch.cuda.is_available():
-    from torch.cuda.amp import GradScaler, autocast
+    from torch.amp import GradScaler, autocast
     print(f"使用 GPU: {torch.cuda.get_device_name(0)}")
     print(f"显存: {torch.cuda.get_device_properties(0).total_memory / 1024**3:.1f} GB")
 else:
@@ -25,6 +25,7 @@ else:
     # 创建dummy的autocast和scaler
     from contextlib import nullcontext as autocast
     class GradScaler:
+        def __init__(self, device='cuda'): pass
         def scale(self, loss): return loss
         def step(self, optimizer): optimizer.step()
         def update(self): pass
@@ -141,7 +142,7 @@ def train():
     )
     
     # 混合精度训练
-    scaler = GradScaler() if config.use_amp and config.device == 'cuda' else None
+    scaler = GradScaler('cuda') if config.use_amp and config.device == 'cuda' else None
     
     # 创建保存目录
     save_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'checkpoints')
@@ -171,22 +172,40 @@ def train():
                 
                 # 前向传播
                 if config.use_amp and scaler is not None:
-                    with autocast():
+                    with autocast('cuda'):
                         loss = model(src_input, tgt_input)
-                        loss = loss / config.gradient_accumulation
-                    
+                        
+                    # 检查NaN
+                    if torch.isnan(loss) or torch.isinf(loss):
+                        print(f"\n警告: 检测到NaN/Inf loss，跳过此batch")
+                        optimizer.zero_grad()
+                        continue
+                        
+                    loss = loss / config.gradient_accumulation
                     scaler.scale(loss).backward()
                     
                     if (step + 1) % config.gradient_accumulation == 0:
+                        # 梯度裁剪
+                        scaler.unscale_(optimizer)
+                        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
                         scaler.step(optimizer)
                         scaler.update()
                         optimizer.zero_grad()
                 else:
                     loss = model(src_input, tgt_input)
+                    
+                    # 检查NaN
+                    if torch.isnan(loss) or torch.isinf(loss):
+                        print(f"\n警告: 检测到NaN/Inf loss，跳过此batch")
+                        optimizer.zero_grad()
+                        continue
+                        
                     loss = loss / config.gradient_accumulation
                     loss.backward()
                     
                     if (step + 1) % config.gradient_accumulation == 0:
+                        # 梯度裁剪
+                        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
                         optimizer.step()
                         optimizer.zero_grad()
                 
@@ -246,7 +265,7 @@ def evaluate(model, data_loader, config):
                     src_input[key] = src_input[key].to(config.device)
             
             if config.use_amp and config.device == 'cuda':
-                with autocast():
+                with autocast('cuda'):
                     loss = model(src_input, tgt_input)
             else:
                 loss = model(src_input, tgt_input)

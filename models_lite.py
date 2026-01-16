@@ -76,18 +76,32 @@ class SignLanguageLite(nn.Module):
         # 特征融合
         self.fusion = nn.Linear(256 * 3, 512)  # body + left_hand + right_hand
         
-        # 投影到语言模型维度
-        self.proj = nn.Linear(512, 512)  # mT5-small hidden_size
-        
         # 加载轻量语言模型
-        self.mt5_tokenizer = T5Tokenizer.from_pretrained(args.mt5_path)
-        self.mt5_model = MT5ForConditionalGeneration.from_pretrained(
-            args.mt5_path,
-            torch_dtype=torch.float16  # 使用半精度
-        )
+        self.mt5_tokenizer = T5Tokenizer.from_pretrained(args.mt5_path, legacy=True)
+        self.mt5_model = MT5ForConditionalGeneration.from_pretrained(args.mt5_path)
+        
+        # 获取mT5的实际hidden_size并调整投影层
+        mt5_hidden_size = self.mt5_model.config.d_model  # 通常是512
+        self.proj = nn.Linear(512, mt5_hidden_size)
+        
+        # 添加层归一化以稳定训练
+        self.layer_norm = nn.LayerNorm(mt5_hidden_size)
+        
+        print(f"mT5 hidden_size: {mt5_hidden_size}")
         
         # 冻结部分语言模型参数以节省显存
         self._freeze_mt5_layers()
+        
+        # 初始化权重
+        self._init_weights()
+    
+    def _init_weights(self):
+        """初始化新添加层的权重"""
+        for module in [self.pose_embed, self.fusion, self.proj]:
+            if isinstance(module, nn.Linear):
+                nn.init.xavier_uniform_(module.weight)
+                if module.bias is not None:
+                    nn.init.zeros_(module.bias)
         
     def _freeze_mt5_layers(self):
         """冻结mT5的部分层"""
@@ -99,14 +113,29 @@ class SignLanguageLite(nn.Module):
     def encode_pose(self, pose_data):
         """编码姿态数据"""
         # pose_data: dict with 'body', 'left', 'right' keys
-        # 每个: (B, T, V, 2)
+        # 每个: (B, T, V, 3) - 坐标x, y + 置信度
         
         B, T = pose_data['body'].shape[:2]
         
-        # 嵌入坐标
-        body_feat = self.pose_embed(pose_data['body'])  # (B, T, V, 64)
-        left_feat = self.pose_embed(pose_data['left'])
-        right_feat = self.pose_embed(pose_data['right'])
+        # 确保数据类型正确
+        body = pose_data['body'].float()
+        left = pose_data['left'].float()
+        right = pose_data['right'].float()
+        
+        # 处理NaN和Inf值
+        body = torch.nan_to_num(body, nan=0.0, posinf=1.0, neginf=-1.0)
+        left = torch.nan_to_num(left, nan=0.0, posinf=1.0, neginf=-1.0)
+        right = torch.nan_to_num(right, nan=0.0, posinf=1.0, neginf=-1.0)
+        
+        # 裁剪到合理范围
+        body = torch.clamp(body, -10.0, 10.0)
+        left = torch.clamp(left, -10.0, 10.0)
+        right = torch.clamp(right, -10.0, 10.0)
+        
+        # 嵌入坐标 (输入维度是3: x, y, confidence)
+        body_feat = self.pose_embed(body)  # (B, T, V, 64)
+        left_feat = self.pose_embed(left)
+        right_feat = self.pose_embed(right)
         
         # 调整维度为 (B, C, T, V)
         body_feat = rearrange(body_feat, 'b t v c -> b c t v')
@@ -127,7 +156,11 @@ class SignLanguageLite(nn.Module):
         fused = torch.cat([body_feat, left_feat, right_feat], dim=-1)
         fused = self.fusion(fused)  # (B, T, 512)
         
-        return self.proj(fused)
+        # 投影并归一化
+        output = self.proj(fused)
+        output = self.layer_norm(output)
+        
+        return output
     
     def forward(self, src_input, tgt_input):
         """训练前向传播"""
@@ -150,7 +183,7 @@ class SignLanguageLite(nn.Module):
         labels[labels == self.mt5_tokenizer.pad_token_id] = -100
         
         # mT5前向传播
-        with torch.cuda.amp.autocast():  # 混合精度
+        with torch.amp.autocast(device_type='cuda', enabled=pose_embeds.is_cuda):  # 混合精度
             outputs = self.mt5_model(
                 inputs_embeds=pose_embeds,
                 attention_mask=attention_mask,
@@ -166,7 +199,7 @@ class SignLanguageLite(nn.Module):
         pose_embeds = self.encode_pose(src_input)
         attention_mask = src_input['attention_mask']
         
-        with torch.cuda.amp.autocast():
+        with torch.amp.autocast(device_type='cuda', enabled=pose_embeds.is_cuda):
             outputs = self.mt5_model.generate(
                 inputs_embeds=pose_embeds,
                 attention_mask=attention_mask,

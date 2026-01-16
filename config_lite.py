@@ -21,7 +21,7 @@ class TrainConfig:
     batch_size = 2          # 小批量
     gradient_accumulation = 4  # 梯度累积模拟大批量
     epochs = 30
-    learning_rate = 5e-4
+    learning_rate = 1e-4    # 降低学习率避免NaN
     weight_decay = 0.01
     
     # 序列配置
@@ -34,7 +34,7 @@ class TrainConfig:
     
     # 设备配置
     device = 'cuda'
-    num_workers = 2
+    num_workers = 0         # Windows下建议设为0
 
 
 class InferenceConfig:
