@@ -29,7 +29,7 @@ class TrainConfig:
     max_text_length = 50    # 最大文本长度
     
     # 优化配置
-    use_amp = True          # 混合精度训练
+    use_amp = False         # 禁用混合精度训练，避免NaN问题
     gradient_checkpointing = True  # 梯度检查点
     
     # 设备配置

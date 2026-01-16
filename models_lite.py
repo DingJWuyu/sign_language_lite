@@ -182,14 +182,17 @@ class SignLanguageLite(nn.Module):
         labels = tgt_tokens['input_ids'].to(pose_embeds.device)
         labels[labels == self.mt5_tokenizer.pad_token_id] = -100
         
+        # 确保数据类型匹配 - 不使用autocast，直接用float32
+        pose_embeds = pose_embeds.float()
+        attention_mask = attention_mask.float()
+        
         # mT5前向传播
-        with torch.amp.autocast(device_type='cuda', enabled=pose_embeds.is_cuda):  # 混合精度
-            outputs = self.mt5_model(
-                inputs_embeds=pose_embeds,
-                attention_mask=attention_mask,
-                labels=labels,
-                return_dict=True
-            )
+        outputs = self.mt5_model(
+            inputs_embeds=pose_embeds,
+            attention_mask=attention_mask,
+            labels=labels,
+            return_dict=True
+        )
         
         return outputs.loss
     
@@ -199,14 +202,17 @@ class SignLanguageLite(nn.Module):
         pose_embeds = self.encode_pose(src_input)
         attention_mask = src_input['attention_mask']
         
-        with torch.amp.autocast(device_type='cuda', enabled=pose_embeds.is_cuda):
-            outputs = self.mt5_model.generate(
-                inputs_embeds=pose_embeds,
-                attention_mask=attention_mask,
-                max_new_tokens=max_new_tokens,
-                num_beams=3,  # 减少beam数量
-                early_stopping=True
-            )
+        # 确保类型匹配
+        pose_embeds = pose_embeds.float()
+        attention_mask = attention_mask.float()
+        
+        outputs = self.mt5_model.generate(
+            inputs_embeds=pose_embeds,
+            attention_mask=attention_mask,
+            max_new_tokens=max_new_tokens,
+            num_beams=3,  # 减少beam数量
+            early_stopping=True
+        )
         
         # 解码
         texts = self.mt5_tokenizer.batch_decode(outputs, skip_special_tokens=True)
