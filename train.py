@@ -106,15 +106,25 @@ def load_checkpoint(checkpoint_path, model, optimizer, scheduler=None):
     
     # 加载模型权重
     if 'model_state_dict' in checkpoint:
-        model.load_state_dict(checkpoint['model_state_dict'])
+        # strict=False 允许加载不完全匹配的模型（处理新增层或结构变更）
+        missing_keys, unexpected_keys = model.load_state_dict(checkpoint['model_state_dict'], strict=False)
+        if missing_keys:
+            print(f"  [警告] 缺失键 (将使用随机初始化): {missing_keys[:5]} ...")
+        if unexpected_keys:
+            print(f"  [警告] 未预期键 (将被忽略): {unexpected_keys[:5]} ...")
     else:
         # 旧格式的检查点，直接是模型权重
-        model.load_state_dict(checkpoint)
+        model.load_state_dict(checkpoint, strict=False)
         return 0, float('inf')
     
     # 加载优化器状态
+    # 如果模型参数发生了巨大变化（如解冻层），旧的优化器状态可能导致错误
     if 'optimizer_state_dict' in checkpoint and optimizer is not None:
-        optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+        try:
+            optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+        except ValueError as e:
+            print(f"  [警告] 无法加载优化器状态 (可能是参数量变更): {e}")
+            print("  已重置优化器状态，从头开始优化。")
     
     # 加载调度器状态
     if 'scheduler_state_dict' in checkpoint and scheduler is not None:

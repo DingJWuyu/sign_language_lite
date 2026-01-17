@@ -1,6 +1,7 @@
 import torch
 import torch.nn as nn
 import os
+import math
 
 # 尝试导入 transformers，如果失败则提供友好提示
 try:
@@ -45,6 +46,26 @@ class LightweightGCN(nn.Module):
         return x
 
 
+class PositionalEncoding(nn.Module):
+    """注入时序信息的位置编码"""
+    def __init__(self, d_model, max_len=512, dropout=0.1):
+        super().__init__()
+        self.dropout = nn.Dropout(p=dropout)
+
+        position = torch.arange(max_len).unsqueeze(1)
+        div_term = torch.exp(torch.arange(0, d_model, 2) * (-math.log(10000.0) / d_model))
+        pe = torch.zeros(max_len, 1, d_model)
+        pe[:, 0, 0::2] = torch.sin(position * div_term)
+        pe[:, 0, 1::2] = torch.cos(position * div_term)
+        self.register_buffer('pe', pe)
+
+    def forward(self, x):
+        # x: (B, T, C) -> (T, B, C) for indexing
+        x = x.permute(1, 0, 2)
+        x = x + self.pe[:x.size(0)]
+        return self.dropout(x.permute(1, 0, 2))
+
+
 class SignLanguageLite(nn.Module):
     """轻量化手语识别模型"""
     
@@ -87,6 +108,9 @@ class SignLanguageLite(nn.Module):
         mt5_hidden_size = self.mt5_model.config.d_model  # 通常是512
         self.proj = nn.Linear(512, mt5_hidden_size)
         
+        # 位置编码 (增强前端时序能力)
+        self.pos_encoder = PositionalEncoding(mt5_hidden_size, max_len=512)
+        
         # 添加层归一化以稳定训练
         self.layer_norm = nn.LayerNorm(mt5_hidden_size)
         
@@ -105,25 +129,30 @@ class SignLanguageLite(nn.Module):
                 nn.init.xavier_uniform_(module.weight)
                 if module.bias is not None:
                     nn.init.zeros_(module.bias)
-        
+
     def _freeze_mt5_layers(self):
-        """冻结mT5的部分层 - 解冻更多层以提高学习能力"""
-        # 解冻最后3层decoder和最后2层encoder
-        for name, param in self.mt5_model.named_parameters():
-            # 解冻 decoder的最后3层 (block.3, block.4, block.5)
-            if any(f'decoder.block.{i}' in name for i in [3, 4, 5]):
-                param.requires_grad = True
-            # 解冻 encoder的最后2层 (block.4, block.5)
-            elif any(f'encoder.block.{i}' in name for i in [4, 5]):
-                param.requires_grad = True
-            # 解冻 lm_head
-            elif 'lm_head' in name:
-                param.requires_grad = True
-            # 解冻 final_layer_norm
-            elif 'final_layer_norm' in name:
-                param.requires_grad = True
-            else:
+        """
+        冻结策略调整:
+        1. 必须解冻 Encoder: 因为输入是姿态而非文本，Encoder必须重新学习
+        2. 冻结部分 Decoder: 保留预训练的语言生成能力，节省显存
+        """
+        print("应用优化后的冻结策略: 解冻 Encoder, 冻结部分 Decoder")
+        
+        # 1. 解冻整个 Encoder
+        for param in self.mt5_model.encoder.parameters():
+            param.requires_grad = True
+            
+        # 2. 冻结 Decoder 的前半部分 (假设有8层，冻结前4层)
+        # mT5-small config: num_decoder_layers=8, num_heads=6, d_model=512
+        for name, param in self.mt5_model.decoder.named_parameters():
+            if 'block.0.' in name or 'block.1.' in name or 'block.2.' in name or 'block.3.' in name:
                 param.requires_grad = False
+            else:
+                param.requires_grad = True
+                
+        # 3. 始终解冻 lm_head
+        for param in self.mt5_model.lm_head.parameters():
+            param.requires_grad = True
     
     def encode_pose(self, pose_data):
         """编码姿态数据"""
@@ -174,6 +203,9 @@ class SignLanguageLite(nn.Module):
         # 投影并归一化
         output = self.proj(fused)
         output = self.layer_norm(output)
+
+        # 注入位置信息
+        output = self.pos_encoder(output)
         
         return output
     

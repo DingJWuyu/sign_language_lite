@@ -18,10 +18,10 @@ rgb_dir = os.path.join(BASE_DIR, "data", "CSL_Daily_lite", "sentence-crop")
 # 训练配置
 class TrainConfig:
     # 基础配置
-    batch_size = 4          # 小批量
-    gradient_accumulation = 4  # 梯度累积模拟大批量
+    batch_size = 2          # 显存优化: 4 -> 2
+    gradient_accumulation = 16  # 2 * 16 = 32 有效batch
     epochs = 50             # 增加训练轮数
-    learning_rate = 5e-5    # 降低学习率，让收敛更稳定
+    learning_rate = 2e-4    # 提高学习率以适应解冻的Encoder
     weight_decay = 0.01
     
     # 学习率调度
