@@ -178,17 +178,13 @@ mt5_path = "google/mt5-small"  # 首次运行会自动下载
 
 ### 5️⃣ 准备数据
 
-**快速测试（演示数据）:**
-```bash
-python data_sampling.py --mode demo
-```
-生成 15 个随机样本，用于验证代码运行。
+请确保 `data/CSL_Daily_lite/` 目录包含以下文件：
+- `labels.train` - 训练集标签
+- `labels.dev` - 验证集标签  
+- `labels.test` - 测试集标签
+- `pose_format/` - 姿态关键点文件目录
 
-**正式训练（真实数据）:**
-```bash
-python data_sampling.py --mode original
-```
-从 CSL-Daily 数据集采样 2000 个样本（需先下载原始数据，见[数据准备](#数据准备)）。
+数据格式详见[数据格式](#-数据格式)章节。
 
 ### 6️⃣ 开始训练
 
@@ -217,15 +213,7 @@ python realtime_demo.py
 
 ### 数据准备
 
-#### 方案 1: 演示数据（快速测试）
-
-```bash
-python data_sampling.py --mode demo
-```
-
-生成 15 个随机样本，仅用于验证代码。**不能用于训练有效模型。**
-
-#### 方案 2: CSL-Daily 采样（推荐）
+#### CSL-Daily 数据集准备
 
 **步骤 1: 下载原始数据**
 
@@ -254,15 +242,13 @@ E:\Uni-Sign\dataset\CSL_Daily\
     └── ...
 ```
 
-**步骤 3: 采样**
+**步骤 3: 数据处理**
 
-```bash
-python data_sampling.py --mode original
-```
+将标签文件（`labels.train/dev/test`）和对应的姿态文件复制到 `data/CSL_Daily_lite/` 目录。
 
-自动从 ~20,000 个样本中采样 ~2,000 个到 `data/CSL_Daily_lite/`。
+> **注意**: 姿态文件名需要与标签文件中的样本ID对应。
 
-#### 方案 3: 自定义数据
+#### 自定义数据
 
 1. **提取姿态关键点** (需要 [MMPose](https://github.com/open-mmlab/mmpose) 或 [RTMLib](https://github.com/Tau-J/rtmlib))
 2. **创建标签文件** (见下方格式说明)
@@ -585,9 +571,7 @@ sign_language_lite/
 │   └── realtime_demo.py        # 实时手语识别演示
 │
 ├── 🛠️ 工具脚本
-│   ├── data_sampling.py        # 数据采样工具
-│   ├── tensorboard_logger.py   # TensorBoard 日志记录
-│   └── test.py                 # 单元测试
+│   └── tensorboard_logger.py   # TensorBoard 日志记录
 │
 ├── 📦 依赖和文档
 │   ├── requirements_lite.txt   # Python 依赖列表
@@ -676,9 +660,12 @@ learning_rate = 5e-5  # 或更低
 batch_size = 2
 ```
 
-4. **检查数据**
-```bash
-python data_sampling.py --mode analyze
+4. **检查数据完整性**
+```python
+import gzip, pickle
+with gzip.open("data/CSL_Daily_lite/labels.train", "rb") as f:
+    data = pickle.load(f)
+    print(f"训练样本数: {len(data)}")
 ```
 
 ---
@@ -737,12 +724,7 @@ mt5_path = "google/mt5-small"  # 首次运行会自动下载到缓存
 
 **解决方案**:
 
-1. **生成演示数据**
-```bash
-python data_sampling.py --mode demo
-```
-
-2. **检查文件结构**
+1. **检查文件结构**
 ```bash
 data/CSL_Daily_lite/
 ├── labels.train  ✓
@@ -861,15 +843,15 @@ tensorboard --logdir runs --host 127.0.0.1
 - **单样本推理**: ~50ms/sample
 - **实时演示**: ~10-15 FPS（包含姿态估计）
 
-### 模型质量（CSL-Daily-Lite 测试集）
+### 模型质量（CSL-Daily 测试集）
 
-| 指标 | 演示数据 | 真实数据（2000样本） |
-|------|---------|---------------------|
-| BLEU-4 | ~5-10 | **40-50** |
-| Exact Match | ~0% | **25-35%** |
-| Char Accuracy | ~20-30% | **65-75%** |
+| 指标 | 典型值 |
+|------|--------|
+| BLEU-4 | **40-50** |
+| Exact Match | **25-35%** |
+| Char Accuracy | **65-75%** |
 
-> ⚠️ **注意**: 演示数据是随机生成的，仅用于验证代码运行，无法训练有效模型。
+> ⚠️ **注意**: 实际性能取决于数据集大小和质量。
 
 ---
 
