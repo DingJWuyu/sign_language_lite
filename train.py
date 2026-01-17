@@ -232,7 +232,7 @@ def evaluate(model, data_loader, config):
     with torch.no_grad():
         for src_input, tgt_input in data_loader:
             # 移动到设备
-            for key in ['body', 'left', 'right', 'face', 'attention_mask']:
+            for key in ['body', 'left', 'right', 'attention_mask']:
                 if key in src_input and torch.is_tensor(src_input[key]):
                     src_input[key] = src_input[key].to(config.device)
             
@@ -448,16 +448,8 @@ def train(args):
         experiment_name = get_experiment_name(config)
         tb_logger = TensorBoardLogger(config.log_dir, experiment_name)
     
-    # 混合精度配置
-    amp_dtype = torch.float16
-    if config.use_amp and torch.cuda.is_available():
-        if torch.cuda.is_bf16_supported():
-            print("AMP: 启用 BFloat16 加速 (比 FP16 更稳定)")
-            amp_dtype = torch.bfloat16
-        else:
-            print("AMP: 启用 FP16 加速")
-
-    scaler = GradScaler('cuda') if config.use_amp and amp_dtype == torch.float16 else None
+    # 混合精度
+    scaler = GradScaler('cuda') if config.use_amp and config.device == 'cuda' else None
     
     # 训练循环
     print(f"\n开始训练...")
@@ -509,12 +501,7 @@ def train(args):
                             gloss_lengths = torch.tensor(lengths, dtype=torch.long, device=config.device)
                     
                     # 前向传播 (Phase 2: 传入 gloss)
-<<<<<<< HEAD
-                    with autocast(device_type=config.device, enabled=config.use_amp, dtype=amp_dtype):
-                        loss = model(src_input, tgt_input, gloss_labels, gloss_lengths)
-=======
                     loss = model(src_input, tgt_input, gloss_labels, gloss_lengths)
->>>>>>> 097375b55b8bd7c1abeff81deacd7bd980b68153
                     
                     # 检查NaN
                     if torch.isnan(loss) or torch.isinf(loss):
@@ -523,21 +510,11 @@ def train(args):
                         continue
                     
                     loss = loss / config.gradient_accumulation
-                    
-                    if scaler:
-                        scaler.scale(loss).backward()
-                    else:
-                        loss.backward()
+                    loss.backward()
                     
                     if (step + 1) % config.gradient_accumulation == 0:
-                        if scaler:
-                            scaler.unscale_(optimizer)
-                            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
-                            scaler.step(optimizer)
-                            scaler.update()
-                        else:
-                            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
-                            optimizer.step()
+                        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+                        optimizer.step()
                         optimizer.zero_grad()
                     
                     batch_loss = loss.item() * config.gradient_accumulation
