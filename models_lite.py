@@ -52,6 +52,9 @@ class SignLanguageLite(nn.Module):
         super().__init__()
         self.args = args
         
+        # 标签平滑
+        self.label_smoothing = getattr(args, 'label_smoothing', 0.1)
+        
         # 关键点配置 (简化版)
         self.body_joints = 9      # 上半身关键点
         self.hand_joints = 21     # 单手关键点
@@ -104,10 +107,22 @@ class SignLanguageLite(nn.Module):
                     nn.init.zeros_(module.bias)
         
     def _freeze_mt5_layers(self):
-        """冻结mT5的部分层"""
-        # 只训练最后2层decoder
+        """冻结mT5的部分层 - 解冻更多层以提高学习能力"""
+        # 解冻最后3层decoder和最后2层encoder
         for name, param in self.mt5_model.named_parameters():
-            if 'decoder.block.5' not in name and 'decoder.block.4' not in name:
+            # 解冻 decoder的最后3层 (block.3, block.4, block.5)
+            if any(f'decoder.block.{i}' in name for i in [3, 4, 5]):
+                param.requires_grad = True
+            # 解冻 encoder的最后2层 (block.4, block.5)
+            elif any(f'encoder.block.{i}' in name for i in [4, 5]):
+                param.requires_grad = True
+            # 解冻 lm_head
+            elif 'lm_head' in name:
+                param.requires_grad = True
+            # 解冻 final_layer_norm
+            elif 'final_layer_norm' in name:
+                param.requires_grad = True
+            else:
                 param.requires_grad = False
     
     def encode_pose(self, pose_data):
@@ -186,7 +201,7 @@ class SignLanguageLite(nn.Module):
         pose_embeds = pose_embeds.float()
         attention_mask = attention_mask.float()
         
-        # mT5前向传播
+        # mT5前向传播 - 使用标签平滑
         outputs = self.mt5_model(
             inputs_embeds=pose_embeds,
             attention_mask=attention_mask,
@@ -194,10 +209,32 @@ class SignLanguageLite(nn.Module):
             return_dict=True
         )
         
+        # 如果启用标签平滑，重新计算loss
+        if self.label_smoothing > 0:
+            # 获取logits并计算平滑后loss
+            logits = outputs.logits
+            vocab_size = logits.size(-1)
+            
+            # Shift for causal LM
+            shift_logits = logits[..., :-1, :].contiguous()
+            shift_labels = labels[..., 1:].contiguous()
+            
+            # 计算平滑的交叉熵损失
+            loss_fct = nn.CrossEntropyLoss(
+                ignore_index=-100,
+                label_smoothing=self.label_smoothing
+            )
+            loss = loss_fct(
+                shift_logits.view(-1, vocab_size),
+                shift_labels.view(-1)
+            )
+            return loss
+        
         return outputs.loss
     
     @torch.no_grad()
-    def generate(self, src_input, max_new_tokens=50):
+    def generate(self, src_input, max_new_tokens=50, num_beams=4, 
+                 length_penalty=1.0, no_repeat_ngram_size=2):
         """推理生成"""
         pose_embeds = self.encode_pose(src_input)
         attention_mask = src_input['attention_mask']
@@ -210,8 +247,11 @@ class SignLanguageLite(nn.Module):
             inputs_embeds=pose_embeds,
             attention_mask=attention_mask,
             max_new_tokens=max_new_tokens,
-            num_beams=3,  # 减少beam数量
-            early_stopping=True
+            num_beams=num_beams,
+            length_penalty=length_penalty,
+            no_repeat_ngram_size=no_repeat_ngram_size,
+            early_stopping=True,
+            do_sample=False,  # 使用确定性解码
         )
         
         # 解码
