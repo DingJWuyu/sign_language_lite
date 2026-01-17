@@ -1,73 +1,94 @@
-# 模型优化分析报告
+# 模型优化方案 (Phase 2)
 
-## 1. 影响模型训练的因素分析
+## 1. 现状回顾与问题分析
 
-当前模型表现极差（Loss 7, Acc 0%）表明模型未能有效收敛。经代码审查，主要原因在于**跨模态迁移学习策略不当**。
+### 1.1 当前状态 (Phase 1)
+在此前的优化中，我们修复了最致命的工程错误——**解冻了 mT5 Encoder**。这解决了跨模态输入的基本适配问题。
+然而，模型目前的训练效果仍然很差（完全匹配率接近 0%），验证集 Loss 居高不下。这表明单纯的参数解冻无法弥补架构上的本质缺失。
 
-### 🔴 最主要因素：Encoder 冻结策略错误
-
-*   **现状**: 代码冻结了 mT5 Encoder 的前 6 层，仅微调最后 2 层。
-*   **问题**: mT5 的 Encoder 是为**文本输入**设计的。当前系统的输入是**姿态坐标**。
-*   **原理**: 预训练的文本 Encoder 权重期望输入具有特定的文本 Embedding 分布特征。姿态特征（连续坐标值）与文本 Embedding（离散 Token 映射）在统计分布和语义空间上完全不同。
-*   **后果**: 将姿态特征输入给**冻结的文本处理层**，相当于对数据进行了随机且不可逆的扰动。后续层无法从这些混乱的激活值中恢复语义信息。**对于从 Pose 到 Text 的跨模态任务，Encoder 必须通过训练来适配新的输入模态。**
-
-### 🟠 次要因素
-
-2.  **前端特征提取能力薄弱**:
-    *   仅使用 2 层简单的 GCN 和线性映射。相比于主流的 10+ 层 ResNet 或复杂的时空 Transformer，该前端很难将原始坐标转换为高质量的高层语义特征。
-
-3.  **绝对位置信息缺失**:
-    *   模型将姿态序列直接线性映射后输入 mT5。虽然 T5 有相对位置偏置，但缺乏显式的时序注入（如 Sinusoidal Encoding），可能导致模型对动作时序（开始/结束/持续时长）不够敏感。
-
-4.  **Label Smoothing 干扰**:
-    *   在模型完全无法拟合数据时（Loss 高），Label Smoothing (0.1) 可能会掩盖模型预测分布过于均匀（Uniform）的问题，使 Loss 看起来稳定但实际上模型在“摆烂”。
+### 1.2 核心瓶颈分析
+基于手语翻译（SLT）的领域特性，当前架构存在以下核心缺陷：
+1.  **语义信息缺失**: 仅使用身体和手部关键点，丢失了面部表情（非手控特征）这一关键语法载体（如疑问、否定、语气）。
+2.  **监督信号稀疏**: 仅依靠最终的文本生成 Loss (CrossEntropy) 来训练整个长序列视觉编码器，梯度难以有效反向传播，导致视觉特征塌缩。
+3.  **时序建模薄弱**: GCN 仅提取帧内空间特征，线性映射无法捕捉动作的动态演变（如“挥手”是一个过程），且原始帧率（25fps）对于 mT5 来说序列过长且冗余。
 
 ---
 
-## 2. 模型优化步骤 (按优先级排列)
+## 2. 下一阶段架构设计 (Phase 2)
 
-请按以下顺序执行优化。步骤 1 是必须执行的关键修复。
+为了解决上述问题，我们将对模型架构进行系统性升级。
 
-### 🥇 步骤一：解冻 mT5 Encoder (Critical)
+### 2.1 总体架构图
 
-**目标**: 让模型学会理解“姿态语言”。
-**操作**: 修改 `models_lite.py`，解冻 Encoder 的所有层。
-**代码修改**:
-```python
-def _freeze_mt5_layers(self):
-    # 1. 始终解冻所有 Encoder 层 (因为跨模态输入)
-    for param in self.mt5_model.encoder.parameters():
-        param.requires_grad = True
-        
-    # 2. 仅冻结 Decoder 的前几层 (保留语言生成能力)
-    for name, param in self.mt5_model.decoder.named_parameters():
-        # 例如: 冻结前 4 层，微调后 4 层 (mT5-small 通常有 8 层)
-        if any(f'block.{i}.' in name for i in range(4)):
-            param.requires_grad = False
-        else:
-            param.requires_grad = True
-            
-    # 3. 始终解冻 Head 和 Norm
-    self.mt5_model.lm_head.requires_grad = True
-    self.mt5_model.final_layer_norm.requires_grad = True
+```mermaid
+graph TD
+    A[输入: 全身关键点序列] --> B[数据预处理]
+    B --> C[空间特征提取 (GCN)]
+    
+    subgraph 视觉编码器
+    C --> D[时序建模 (Temporal Module)]
+    D --> E[视觉-语言对齐 (Visual Adapter)]
+    end
+    
+    D -.-> |辅助监督| F[CTC Loss (Gloss)]
+    E --> G[mT5 Encoder (LoRA/Full)]
+    G --> H[mT5 Decoder (LoRA/Full)]
+    H --> I[输出: 中文文本]
 ```
 
-### 🥈 步骤二：检查并验证输入数据
+### 2.2 详细改进方案
 
-**目标**: 排除“垃圾进，垃圾出”的可能性。
-**操作**: 
-1. 检查 `datasets_lite.py` 中的 `crop_scale` 逻辑，确保没有因某个样本关键点全 0 而产生 NaN。
-2. 确认 `config_lite.py` 中的 `max_length` 设置。如果大多样本很长而被截断严重，会丢失语义。
+#### 🔴 改进一：数据增强与特征扩充 (Data)
+*   **找回面部关键点**: 在 `datasets_lite.py` 中增加面部关键点加载逻辑。
+    *   **策略**: 既然已通过 `pose_format` 加载了 133 点，应提取 **眉毛** (情感/语法)、**眼睛** (视线) 和 **口型** (副词)。
+    *   **归一化**: 面部关键点位移较小，需以鼻尖为中心进行独立归一化。
+*   **数据增强 (Augmentation)**:
+    *   **随机旋转**: +/- 15度。
+    *   **随机缩放**: 模拟不同拍摄距离。
+    *   **时序扰动**: 随机丢帧或插帧，模拟不同打手语速度。
 
-### 🥉 步骤三：调整超参数以适应全参数微调
+#### 🟠 改进二：辅助监督信号 (Gloss CTC)
+*   **引入 Gloss (手语词)**: CSL-Daily 数据集包含 Gloss 标注。
+*   **CTC Loss**: 在时序模块后添加一个线性层，预测 Gloss 序列，计算 CTC Loss。
+    *   **作用**: 强迫视觉编码器学习到“有意义”的手语语义特征，而不是随机噪声，显著加速收敛。
+    *   **公式**: $L_{total} = L_{Translation} + \lambda \cdot L_{CTC}$
 
-**目标**: 稳定训练过程。
-**操作**:
-*   **LR**: 解冻后参数量变大，建议 `learning_rate = 1e-4` 或 `2e-4`。
-*   **Batch Size**: 如果显存爆了（这是可能的），将 `batch_size` 设为 `2` 甚至 `1`。
-*   **Accumulation**: 相应增加 `gradient_accumulation` (如设为 `16` 或 `32`)，确保 `bs * accum >= 32`。
+#### 🟡 改进三：增强时序建模 (Temporal Modeling)
+*   **引入时序层**: 在 GCN 和 mT5 之间插入轻量级时序模块。
+    *   **方案 A (推荐)**: **Bi-GRU** (2层, hidden_size=256)。参数少，适合序列建模。
+    *   **方案 B**: **1D-CNN / MS-TCN**。适合提取局部时序特征。
+*   **下采样 (Downsampling)**: 通过 Stride Conv 或 Pooling 将序列长度缩减 2x 或 4x（例如 128帧 -> 32帧特征）。这能极大减轻 mT5 的计算负担并过滤冗余信息。
 
-### 🏅 步骤四：增强前端 (可选)
+#### 🔵 改进四：预训练对齐策略
+*   **冷启动对齐**:
+    1.  **Stage 1**: 冻结 mT5，只训练前端 (GCN + Temporal + Adapter)。使用 CTC Loss 和 Translation Loss。目的是让视觉特征“适配”mT5 的输入空间。
+    2.  **Stage 2**: 解冻 mT5 (建议使用 LoRA)，进行全参数微调。
 
-**目标**: 提升特征质量。
-**操作**: 在 `models_lite.py` 中，在 linear projection 之后，送入 mT5 之前，加入一个可学习的 `nn.Parameter` 作为 Position Embedding，或者直接使用 `SinusoidalPositionalEncoding`。
+---
+
+## 3. 实施路线图
+
+### 阶段 1: 数据层升级 (优先级：高)
+- [x] 修改 `datasets_lite.py`，增加面部关键点提取逻辑。
+- [ ] 实现基础数据增强（随机旋转、缩放）。
+
+### 阶段 2: 引入 CTC 监督 (优先级：最高)
+- [x] 修改 `datasets_lite.py`，加载 Gloss 标签并建立词表。
+- [x] 修改 `models_lite.py`，在 Visual Encoder 后增加 Gloss Head。
+- [x] 修改 `train.py`，引入 `ctc_loss`，并实现混合 Loss 训练。
+
+### 阶段 3: 时序模块增强 (优先级：中)
+- [x] 在 `SignLanguageLite` 中加入 `nn.GRU` 模块 (Bi-GRU)。
+- [x] 在进入 mT5 前进行时序池化/下采样 (2x)。
+
+### 阶段 4: 进阶训练配置 (优先级：低)
+- [ ] 引入 LoRA 降低显存消耗。
+- [ ] 编写两阶段训练脚本。
+
+---
+
+## 4. 预期性能提升
+通过上述改进，预期模型在验证集上的表现将有如下改善：
+*   **收敛稳定性**: Loss 曲线将更加平滑，不再出现 7.0 这样的高 Loss。
+*   **完全匹配率**: 逐步提升，突破 0% 的瓶颈。
+*   **翻译质量**: 生成的文本将更符合中文语法，语义更准确。

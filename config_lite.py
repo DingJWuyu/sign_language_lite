@@ -18,8 +18,8 @@ rgb_dir = os.path.join(BASE_DIR, "data", "CSL_Daily_lite", "sentence-crop")
 # 训练配置
 class TrainConfig:
     # 基础配置
-    batch_size = 2          # 显存优化: 4 -> 2
-    gradient_accumulation = 16  # 2 * 16 = 32 有效batch
+    batch_size = 4          # 根据显存决定
+    gradient_accumulation = 16  # 4 * 16 = 64 有效batch
     epochs = 50             # 增加训练轮数
     learning_rate = 2e-4    # 提高学习率以适应解冻的Encoder
     weight_decay = 0.01
@@ -31,6 +31,10 @@ class TrainConfig:
     
     # 标签平滑
     label_smoothing = 0.1   # 标签平滑，防止过拟合
+    
+    # CTC 配置 (Phase 2 新增)
+    use_ctc = True          # 启用 CTC Loss 辅助监督
+    ctc_weight = 0.5        # CTC Loss 权重: total = trans + ctc_weight * ctc
     
     # 序列配置
     max_length = 128        # 最大帧数 (原256)
