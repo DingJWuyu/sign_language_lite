@@ -41,7 +41,7 @@ class TrainConfig:
     max_text_length = 50    # 最大文本长度
     
     # 优化配置
-    use_amp = True          # 启用混合精度训练 (RTX 30/40系列建议开启)
+    use_amp = False         # 禁用混合精度训练，避免NaN问题
     gradient_checkpointing = True  # 梯度检查点
     
     # TensorBoard 配置

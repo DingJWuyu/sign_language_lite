@@ -424,13 +424,7 @@ class SignLanguageLite(nn.Module):
             
             # CTC Loss 需要 (T, B, C) 格式
             gloss_logits = gloss_logits.permute(1, 0, 2)  # (T, B, vocab_size)
-<<<<<<< HEAD
-            
-            # 使用 float32 进行 log_softmax 和 loss 计算以防止 NaN
-            gloss_logits = gloss_logits.float().log_softmax(dim=-1)
-=======
             gloss_logits = gloss_logits.log_softmax(dim=-1)
->>>>>>> 097375b55b8bd7c1abeff81deacd7bd980b68153
             
             # 输入长度 (所有样本使用相同的序列长度)
             input_lengths = torch.full(
