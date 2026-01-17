@@ -424,7 +424,6 @@ class SignLanguageLite(nn.Module):
             
             # CTC Loss 需要 (T, B, C) 格式
             gloss_logits = gloss_logits.permute(1, 0, 2)  # (T, B, vocab_size)
-            
             # 使用 float32 进行 log_softmax 和 loss 计算以防止 NaN
             gloss_logits = gloss_logits.float().log_softmax(dim=-1)
             

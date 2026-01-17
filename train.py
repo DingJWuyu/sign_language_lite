@@ -509,8 +509,12 @@ def train(args):
                             gloss_lengths = torch.tensor(lengths, dtype=torch.long, device=config.device)
                     
                     # 前向传播 (Phase 2: 传入 gloss)
+<<<<<<< HEAD
                     with autocast(device_type=config.device, enabled=config.use_amp, dtype=amp_dtype):
                         loss = model(src_input, tgt_input, gloss_labels, gloss_lengths)
+=======
+                    loss = model(src_input, tgt_input, gloss_labels, gloss_lengths)
+>>>>>>> 097375b55b8bd7c1abeff81deacd7bd980b68153
                     
                     # 检查NaN
                     if torch.isnan(loss) or torch.isinf(loss):
