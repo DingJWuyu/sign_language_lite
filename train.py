@@ -1,8 +1,9 @@
 """
 训练脚本 - 支持断点续训和TensorBoard可视化
-用于训练轻量化手语翻译模型
+用于训练轻量化手语翻译模型 (Phase 2: 支持 CTC Loss)
 """
 import torch
+import torch.nn as nn
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 import os
@@ -10,6 +11,7 @@ import sys
 import argparse
 import glob
 import math
+import json
 
 # 添加当前目录到路径
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -69,6 +71,61 @@ class WarmupCosineScheduler:
     
     def load_state_dict(self, state_dict):
         self.last_epoch = state_dict['last_epoch']
+
+
+# ============ Gloss 词表构建 (Phase 2 新增) ============
+class GlossVocab:
+    """Gloss 词表管理器"""
+    def __init__(self):
+        self.word2idx = {'<blank>': 0, '<unk>': 1}  # 0: CTC blank, 1: unknown
+        self.idx2word = {0: '<blank>', 1: '<unk>'}
+        self.next_idx = 2
+        
+    def add_word(self, word):
+        if word not in self.word2idx:
+            self.word2idx[word] = self.next_idx
+            self.idx2word[self.next_idx] = word
+            self.next_idx += 1
+        return self.word2idx[word]
+    
+    def encode(self, gloss_str):
+        """将 gloss 字符串编码为索引列表"""
+        if not gloss_str:
+            return []
+        words = gloss_str.split()
+        return [self.word2idx.get(w, 1) for w in words]  # 未知词用 <unk>
+    
+    def __len__(self):
+        return self.next_idx
+    
+    def save(self, path):
+        with open(path, 'w', encoding='utf-8') as f:
+            json.dump({'word2idx': self.word2idx}, f, ensure_ascii=False, indent=2)
+    
+    @classmethod
+    def load(cls, path):
+        vocab = cls()
+        with open(path, 'r', encoding='utf-8') as f:
+            data = json.load(f)
+            vocab.word2idx = data['word2idx']
+            vocab.idx2word = {int(v): k for k, v in vocab.word2idx.items()}
+            vocab.next_idx = max(vocab.idx2word.keys()) + 1
+        return vocab
+
+
+def build_gloss_vocab(dataset):
+    """从数据集构建 Gloss 词表"""
+    vocab = GlossVocab()
+    for i in range(len(dataset)):
+        try:
+            _, _, _, gloss = dataset[i]
+            if gloss:
+                for word in gloss.split():
+                    vocab.add_word(word)
+        except:
+            continue
+    print(f"Gloss 词表大小: {len(vocab)}")
+    return vocab
 
 
 def find_latest_checkpoint(checkpoint_dir):
@@ -175,7 +232,7 @@ def evaluate(model, data_loader, config):
     with torch.no_grad():
         for src_input, tgt_input in data_loader:
             # 移动到设备
-            for key in ['body', 'left', 'right', 'attention_mask']:
+            for key in ['body', 'left', 'right', 'face', 'attention_mask']:
                 if key in src_input and torch.is_tensor(src_input[key]):
                     src_input[key] = src_input[key].to(config.device)
             
@@ -283,6 +340,16 @@ def train(args):
         print("错误: 训练数据集为空")
         return
     
+    # 构建 Gloss 词表 (Phase 2 新增)
+    print("构建 Gloss 词表...")
+    gloss_vocab = build_gloss_vocab(train_dataset)
+    gloss_vocab_size = len(gloss_vocab)
+    
+    # 保存词表
+    save_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'checkpoints')
+    os.makedirs(save_dir, exist_ok=True)
+    gloss_vocab.save(os.path.join(save_dir, 'gloss_vocab.json'))
+    
     print("加载验证数据...")
     try:
         dev_dataset = SignLanguageDataset(dev_label_path, config, phase='dev')
@@ -317,6 +384,10 @@ def train(args):
     model_args.mt5_path = mt5_path
     model_args.max_length = config.max_length
     model_args.label_smoothing = config.label_smoothing
+    # Phase 2: CTC 相关配置
+    model_args.gloss_vocab_size = gloss_vocab_size
+    model_args.use_ctc = getattr(config, 'use_ctc', True)
+    model_args.ctc_weight = getattr(config, 'ctc_weight', 0.5)
     
     try:
         model = SignLanguageLite(model_args)
@@ -377,8 +448,16 @@ def train(args):
         experiment_name = get_experiment_name(config)
         tb_logger = TensorBoardLogger(config.log_dir, experiment_name)
     
-    # 混合精度
-    scaler = GradScaler('cuda') if config.use_amp and config.device == 'cuda' else None
+    # 混合精度配置
+    amp_dtype = torch.float16
+    if config.use_amp and torch.cuda.is_available():
+        if torch.cuda.is_bf16_supported():
+            print("AMP: 启用 BFloat16 加速 (比 FP16 更稳定)")
+            amp_dtype = torch.bfloat16
+        else:
+            print("AMP: 启用 FP16 加速")
+
+    scaler = GradScaler('cuda') if config.use_amp and amp_dtype == torch.float16 else None
     
     # 训练循环
     print(f"\n开始训练...")
@@ -401,13 +480,37 @@ def train(args):
             
             for step, (src_input, tgt_input) in enumerate(pbar):
                 try:
-                    # 移动到设备
-                    for key in ['body', 'left', 'right', 'attention_mask']:
+                    # 移动到设备 (Phase 2: 增加 face)
+                    for key in ['body', 'left', 'right', 'face', 'attention_mask']:
                         if key in src_input and torch.is_tensor(src_input[key]):
                             src_input[key] = src_input[key].to(config.device)
                     
-                    # 前向传播
-                    loss = model(src_input, tgt_input)
+                    # 准备 Gloss 标签 (Phase 2 新增)
+                    gloss_labels = None
+                    gloss_lengths = None
+                    if model_args.use_ctc and 'gt_gloss' in tgt_input:
+                        gloss_list = tgt_input['gt_gloss']
+                        encoded_glosses = [gloss_vocab.encode(g) for g in gloss_list]
+                        
+                        # 过滤空 gloss
+                        valid_glosses = [g for g in encoded_glosses if len(g) > 0]
+                        
+                        if len(valid_glosses) == len(encoded_glosses):
+                            # 填充到相同长度
+                            max_gloss_len = max(len(g) for g in encoded_glosses)
+                            padded_glosses = []
+                            lengths = []
+                            for g in encoded_glosses:
+                                lengths.append(len(g))
+                                padded = g + [0] * (max_gloss_len - len(g))  # 0 是 blank
+                                padded_glosses.append(padded)
+                            
+                            gloss_labels = torch.tensor(padded_glosses, dtype=torch.long, device=config.device)
+                            gloss_lengths = torch.tensor(lengths, dtype=torch.long, device=config.device)
+                    
+                    # 前向传播 (Phase 2: 传入 gloss)
+                    with autocast(device_type=config.device, enabled=config.use_amp, dtype=amp_dtype):
+                        loss = model(src_input, tgt_input, gloss_labels, gloss_lengths)
                     
                     # 检查NaN
                     if torch.isnan(loss) or torch.isinf(loss):
@@ -416,11 +519,21 @@ def train(args):
                         continue
                     
                     loss = loss / config.gradient_accumulation
-                    loss.backward()
+                    
+                    if scaler:
+                        scaler.scale(loss).backward()
+                    else:
+                        loss.backward()
                     
                     if (step + 1) % config.gradient_accumulation == 0:
-                        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
-                        optimizer.step()
+                        if scaler:
+                            scaler.unscale_(optimizer)
+                            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+                            scaler.step(optimizer)
+                            scaler.update()
+                        else:
+                            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+                            optimizer.step()
                         optimizer.zero_grad()
                     
                     batch_loss = loss.item() * config.gradient_accumulation

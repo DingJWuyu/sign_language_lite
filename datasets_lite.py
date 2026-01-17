@@ -20,24 +20,42 @@ def load_dataset_file(filename):
         return loaded_object
 
 
-def load_part_kp(skeletons, confs, force_ok=False):
+# ============ 面部关键点索引 (COCO-WholeBody 格式) ============
+# 眉毛: 左眉 [33-37], 右眉 [43-47] -> 共10点
+# 眼睛: 左眼 [38-42], 右眼 [48-52] -> 共10点  
+# 嘴唇: 外轮廓 [76-87] -> 共12点
+# 总计: 32点面部关键点
+FACE_EYEBROW_LEFT = list(range(33, 38))   # 5点
+FACE_EYEBROW_RIGHT = list(range(43, 48))  # 5点
+FACE_EYE_LEFT = list(range(38, 43))       # 5点  
+FACE_EYE_RIGHT = list(range(48, 53))      # 5点
+FACE_MOUTH = list(range(76, 88))          # 12点
+FACE_INDICES = FACE_EYEBROW_LEFT + FACE_EYEBROW_RIGHT + FACE_EYE_LEFT + FACE_EYE_RIGHT + FACE_MOUTH  # 32点
+
+
+def load_part_kp(skeletons, confs, force_ok=False, use_face=True):
     """
-    从全身关键点中提取各部位关键点
+    从全身关键点中提取各部位关键点 (Phase 2: 增加面部)
     
     Args:
         skeletons: 关键点坐标列表, 每个元素形状 (1, 133, 2)
         confs: 置信度列表, 每个元素形状 (1, 133)
         force_ok: 是否强制返回有效结果
+        use_face: 是否提取面部关键点
     
     Returns:
-        kps_with_scores: dict, 包含 body, left, right 三个部分的关键点
+        kps_with_scores: dict, 包含 body, left, right, face 的关键点
     """
     thr = 0.3  # 置信度阈值
     kps_with_scores = {}
     scale = None
     
-    # 只处理 body, left, right 三个部分（去除face_all以简化）
-    for part in ['body', 'left', 'right']:
+    # 处理各部分关键点
+    parts = ['body', 'left', 'right']
+    if use_face:
+        parts.append('face')
+    
+    for part in parts:
         kps = []
         confidences = []
         
@@ -59,8 +77,20 @@ def load_part_kp(skeletons, confs, force_ok=False):
                 hand_kp2d = skeleton[112:133, :]
                 hand_kp2d = hand_kp2d - hand_kp2d[0, :]  # 相对于手腕归一化
                 confidence = conf[112:133]
+            elif part == 'face':
+                # 面部32个关键点: 眉毛+眼睛+嘴唇
+                # 注意: COCO-WholeBody 中面部点从索引23开始
+                face_offset = 23  # 面部关键点在133点中的起始偏移
+                face_indices = [face_offset + i for i in FACE_INDICES if face_offset + i < 91]
+                if len(face_indices) < 10:  # 兜底: 使用简化的面部点
+                    face_indices = list(range(23, 55))  # 取前32个面部点
+                hand_kp2d = skeleton[face_indices, :]
+                # 以鼻尖(索引0)为中心归一化
+                nose_pos = skeleton[0, :]
+                hand_kp2d = hand_kp2d - nose_pos
+                confidence = conf[face_indices]
             else:
-                raise NotImplementedError
+                raise NotImplementedError(f"Unknown part: {part}")
             
             kps.append(hand_kp2d)
             confidences.append(confidence)
@@ -74,6 +104,14 @@ def load_part_kp(skeletons, confs, force_ok=False):
                 np.concatenate([kps, confidences[..., None]], axis=-1), 
                 thr
             )
+        elif part == 'face':
+            # 面部独立归一化 (位移较小，需要放大)
+            result = np.concatenate([kps, confidences[..., None]], axis=-1)
+            # 面部使用固定的缩放因子，因为位移很小
+            face_scale = 0.2 if scale and scale > 0 else 1.0
+            result[..., :2] = result[..., :2] / face_scale
+            result = np.clip(result, -1, 1)
+            result[result[..., 2] <= thr] = 0
         else:
             # 手部已经相对于手腕归一化
             assert scale is not None
@@ -275,11 +313,12 @@ class SignLanguageDataset(data.Dataset):
         return pose_data
     
     def _empty_pose(self):
-        """返回空的姿态数据"""
+        """返回空的姿态数据 (包含面部)"""
         return {
             'body': torch.zeros(1, 9, 3),
             'left': torch.zeros(1, 21, 3),
             'right': torch.zeros(1, 21, 3),
+            'face': torch.zeros(1, 32, 3),
         }
     
     def collate_fn(self, batch):
@@ -292,6 +331,10 @@ class SignLanguageDataset(data.Dataset):
         
         for name, pose, text, gloss in batch:
             names.append(name)
+            # 确保 pose 有 'face' 键
+            if 'face' not in pose:
+                T = pose['body'].shape[0]
+                pose['face'] = torch.zeros(T, 32, 3)
             poses.append(pose)
             texts.append(text)
             glosses.append(gloss)
@@ -299,8 +342,8 @@ class SignLanguageDataset(data.Dataset):
         # 构建源输入
         src_input = {}
         
-        # 填充各部位的姿态数据
-        for key in ['body', 'left', 'right']:
+        # 填充各部位的姿态数据 (包含面部)
+        for key in ['body', 'left', 'right', 'face']:
             # 获取最大长度
             max_len = max(pose[key].shape[0] for pose in poses)
             
@@ -439,6 +482,7 @@ class SignLanguageDatasetSimple(data.Dataset):
             'body': torch.zeros(1, 9, 3),
             'left': torch.zeros(1, 21, 3),
             'right': torch.zeros(1, 21, 3),
+            'face': torch.zeros(1, 32, 3),
         }
     
     def collate_fn(self, batch):
@@ -447,13 +491,17 @@ class SignLanguageDatasetSimple(data.Dataset):
         
         for name, pose, text, gloss in batch:
             names.append(name)
+            # 确保 pose 有 'face' 键
+            if 'face' not in pose:
+                T = pose['body'].shape[0]
+                pose['face'] = torch.zeros(T, 32, 3)
             poses.append(pose)
             texts.append(text)
             glosses.append(gloss)
         
         src_input = {}
         
-        for key in ['body', 'left', 'right']:
+        for key in ['body', 'left', 'right', 'face']:
             max_len = max(pose[key].shape[0] for pose in poses)
             lengths = [pose[key].shape[0] for pose in poses]
             
