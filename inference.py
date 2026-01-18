@@ -36,6 +36,30 @@ def load_model(model_path, config):
     args.max_length = config.max_length
     args.label_smoothing = 0  # 推理时不需要标签平滑
     
+    # 自动推断 Gloss 词表大小 (Fix for shape mismatch)
+    gloss_vocab_path = os.path.join(os.path.dirname(model_path), 'gloss_vocab.json')
+    if not os.path.exists(gloss_vocab_path):
+        # 尝试默认路径
+        gloss_vocab_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'checkpoints', 'gloss_vocab.json')
+        
+    if os.path.exists(gloss_vocab_path):
+        try:
+            import json
+            with open(gloss_vocab_path, 'r', encoding='utf-8') as f:
+                vocab_data = json.load(f)
+                # 如果是 word2idx 结构
+                if 'word2idx' in vocab_data:
+                    args.gloss_vocab_size = len(vocab_data['word2idx'])
+                else:
+                    args.gloss_vocab_size = len(vocab_data)
+                print(f"已加载 Gloss 词表，大小: {args.gloss_vocab_size}")
+        except Exception as e:
+            print(f"无法加载 Gloss 词表: {e}，使用默认大小 2000")
+            args.gloss_vocab_size = 2000
+    else:
+        print("未找到 Gloss 词表文件，使用默认大小 2000")
+        args.gloss_vocab_size = 2000
+
     model = SignLanguageLite(args)
     
     if os.path.exists(model_path):
@@ -253,7 +277,7 @@ def inference_batch(model, dataloader, config, output_file=None):
     with torch.no_grad():
         for src_input, tgt_input in tqdm(dataloader, desc="推理中"):
             # 移动到设备
-            for key in ['body', 'left', 'right', 'attention_mask']:
+            for key in ['body', 'left', 'right', 'face', 'attention_mask']:
                 if key in src_input:
                     src_input[key] = src_input[key].to(config.device)
             

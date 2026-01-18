@@ -63,7 +63,7 @@ class TrainConfig:
 
 
 class InferenceConfig:
-    batch_size = 1
+    batch_size = 4
     max_length = 128
     num_beams = 4           # 增加beam数量
     device = 'cuda'

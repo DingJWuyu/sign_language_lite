@@ -231,8 +231,8 @@ def evaluate(model, data_loader, config):
     
     with torch.no_grad():
         for src_input, tgt_input in data_loader:
-            # 移动到设备
-            for key in ['body', 'left', 'right', 'attention_mask']:
+            # 移动到设备 (Phase 2: 增加 face)
+            for key in ['body', 'left', 'right', 'face', 'attention_mask']:
                 if key in src_input and torch.is_tensor(src_input[key]):
                     src_input[key] = src_input[key].to(config.device)
             
